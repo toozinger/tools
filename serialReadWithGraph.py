@@ -14,9 +14,8 @@ import pandas as pd
 import os
 
 from PyQt5 import QtWidgets, QtCore
-from pyqtgraph import PlotWidget, plot
+# from pyqtgraph import PlotWidget, plot
 import pyqtgraph as pg
-import sys  # We need sys so that we can pass argv to QApplication
 
 
 
@@ -34,39 +33,50 @@ def checkComPorts():
           serialPorts.append(portNumber)
           serialPortDescriptions.append(portDescription) 
           
-    return serialPorts, serialPortDescriptions
-
-       
-# Small function for preparing and sending data to the arduino
+    return serialPorts, serialPortDescriptions        
+        
+# Function to open connection to serial port
 # ******************************************************************
-def sendData(serialDataConnection, controlString, controlFloat):
-    
+def openSerial(COMport, baudRate):
+
+    # Try to open connection
     try:
-        # Applies line delimeters, and puts the comma between the words and values
-        sendData = "<"+ str(controlString) + "," + str(controlFloat) + ">" 
-        #print("sending: ", sendData)
-        serialDataConnection.write(sendData.encode('utf-8'))
-        exitNow = False
-        return exitNow
-    except KeyboardInterrupt:
-        print("Manual exit requested")
-        exitNow = True
-        return exitNow
+        serialDataConnection = serial.Serial(COMport,baudRate,timeout=0.1, write_timeout=0.5)
+        serialDataConnection.flushInput()
+        time.sleep(0.2) # wait for Arduino
+        # print("Controller Arduino Connected")
+        return serialDataConnection
+    
+    # Attemps to self-fix issue from un-closed ports
     except:
-        print("Error in sending serial data to Arduino")
- 
+        pass
+        # print("Failed to connect to Arduino. Trying again")
+        
+    # try to close the serial if it's open
+    try:
+        serialDataConnection.close()   
+    except:
+        pass
+       
+    try:
+        serialDataConnection = serial.Serial(COMport,baudRate,timeout=5)
+        serialDataConnection.flushInput()
+        time.sleep(2) # wait for Arduino
+        # print("Controller Arduino Connected")
+        return serialDataConnection
+    except:
+        print("Failed to connect. Serial busy with another program")
+        return False
 
-# Main Program    
-# ******************************************************************  ******************************************************************
-
-# List what ports are available
+# Manually run this to check which ports are available
+# ******************************************************************
 serialPorts, serialPortDescriptions = checkComPorts()
 print(f"Serial ports connected: {serialPorts}")
 print(f"Serial port descriptions: {serialPortDescriptions}")
            
-    
 
-
+# Main Program    
+# ******************************************************************  ******************************************************************
 
 class MainWindow(QtWidgets.QMainWindow):
 
@@ -75,78 +85,53 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.graphWidget = pg.PlotWidget()
         self.setCentralWidget(self.graphWidget)
-
-        self.x = [0, 1]
-        self.y = [0,2]
+        
+        self.startTime = datetime.now()
+        
+        # Initialize plot variables
+        self.x = []
+        self.y = []
 
         self.graphWidget.setBackground('w')
 
         pen = pg.mkPen(color=(255, 0, 0))
         self.data_line =  self.graphWidget.plot(self.x, self.y, pen=pen)
         
-        # Timer for plotting
+        # Timer for plotting update interval
         self.plotTimer = QtCore.QTimer()
         self.plotTimer.setInterval(100)
         self.plotTimer.timeout.connect(self.update_plot_data)
         self.plotTimer.start()
         
-        # Timer for reading serial
+        # Timer for checking serial (only reads if there's data)
         self.serialReadTimer = QtCore.QTimer()
-        self.serialReadTimer.setInterval(1)
+        self.serialReadTimer.setInterval(5)
         self.serialReadTimer.timeout.connect(self.readSerial)
         self.serialReadTimer.start()
         
-        # Setup communication
+        # Setup communication and save name and location
         COMport = "COM4"
         baudRate = 115200
-        
+        saveName = "TestSerial Read"
         self.saveFileLocal = "G:\My Drive\Documents\Projects\pythonToolsGithub"
-        self.saveFileName = "TestSerial Read"
         
+        # Add current datetime to savefile name, to keep files well documented
+        saveFileDatetime = datetime.now().strftime("%Y-%m-%d %H-%M-%S")
+        self.saveFileName = f"{saveFileDatetime} {saveName}"
         txtSaveFileName = f"{self.saveFileName}.txt"
         self.saveFileFullName = os.path.join(self.saveFileLocal, txtSaveFileName)
         
-        self.serialDataConnection = self.openSerial(COMport, baudRate)
+        # Connect to serial device
+        self.serialDataConnection = openSerial(COMport, baudRate)
         
         # Checkc if COM connected
-        if not serialDataConnection: 
-            sys.exit()
+        if not self.serialDataConnection: 
+            self.closeEvent()
             
         # Initialization
         self.inWaiting = 0
         self.allData = []
-     
-    # Open serial port
-    def openSerial(self, COMport, baudRate):
     
-        # Try to open connection
-        try:
-            serialDataConnection = serial.Serial(COMport,baudRate,timeout=0.1, write_timeout=0.5)
-            serialDataConnection.flushInput()
-            time.sleep(0.2) # wait for Arduino
-            # print("Controller Arduino Connected")
-            return serialDataConnection
-        
-        # Attemps to self-fix issue from un-closed ports
-        except:
-            pass
-            # print("Failed to connect to Arduino. Trying again")
-            
-        # try to close the serial if it's open
-        try:
-            serialDataConnection.close()   
-        except:
-            pass
-           
-        try:
-            serialDataConnection = serial.Serial(COMport,baudRate,timeout=5)
-            serialDataConnection.flushInput()
-            time.sleep(2) # wait for Arduino
-            # print("Controller Arduino Connected")
-            return serialDataConnection
-        finally:
-            print("Failed to connect. Serial busy with another program")
-            return False
 
 
     def update_plot_data(self):
@@ -171,6 +156,13 @@ class MainWindow(QtWidgets.QMainWindow):
             self.allData.append([now, data])
             with open(self.saveFileFullName, "a") as saveFile: saveFile.write(f"{now}, {data}\n")
             
+            timeSinceStart = (datetime.now() - self.startTime).total_seconds()
+            
+            # print(f"x: {timeSinceStart}")
+            # print(f"y: {data}")
+            self.x.append(timeSinceStart)
+            self.y.append(data)
+            
     def cleanData(self, data):
             
         dataList = data.split()
@@ -189,6 +181,9 @@ class MainWindow(QtWidgets.QMainWindow):
     # Handeling close event nicer
     def closeEvent(self, event):
         
+        self.serialReadTimer.stop()
+        self.plotTimer.stop()
+        
         self.serialDataConnection.close()
         
         # Optional save file to excel
@@ -198,6 +193,8 @@ class MainWindow(QtWidgets.QMainWindow):
         
         with pd.ExcelWriter(xlsSaveName) as writer:
             allDataDF.to_excel(writer, header=False, index=False)
+            
+        event.accept()
          
 
 app = QtWidgets.QApplication(sys.argv)

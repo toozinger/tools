@@ -97,6 +97,23 @@ def readController(serialDataConnection):
         
     return serialLine
 
+# CUSTOMIZABLE Function for cleaning the incoming data  
+# ******************************************************************
+def cleanData(data):
+    
+    dataList = data.split()
+    cleanData = []
+    
+    for item in dataList:
+        try:
+            cleanData.append(float(item))
+        except ValueError:
+            pass
+    
+    if len(cleanData) == 1: cleanData = cleanData[0]
+    
+    return cleanData
+
 # Main Program    
 # ******************************************************************  ******************************************************************
 
@@ -113,17 +130,19 @@ saveFileLocal = "G:\My Drive\Documents\Projects\pythonToolsGithub"
 saveFileName = "TestSerial Read"
 
 txtSaveFileName = f"{saveFileName}.txt"
-saveFileFullName = os.path.join(saveFileLocal, saveFileName)
+saveFileFullName = os.path.join(saveFileLocal, txtSaveFileName)
 
 serialDataConnection = openSerial(COMport, baudRate)
 
+# Checkc if COM connected
 if not serialDataConnection: 
     sys.exit()
 
-# Checks buffer for new data
+# Initialization
 inWaiting = 0
-
 allData = []
+
+
 
 # Infinite loop for reading data
 while True:
@@ -132,6 +151,7 @@ while True:
     try:
         if inWaiting < serialDataConnection.in_waiting:
             data = readController(serialDataConnection)
+            data = cleanData(data)
             now = datetime.now()
             
             print(f"{now} {data}")
@@ -140,6 +160,7 @@ while True:
     
     except KeyboardInterrupt:
         serialDataConnection.close()
+        break
            
     
 # Optional save file to excel

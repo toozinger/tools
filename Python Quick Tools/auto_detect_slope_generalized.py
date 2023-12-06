@@ -16,38 +16,9 @@ import matplotlib.pyplot as plt
 from math import pi
 from scipy.signal import savgol_filter
 import numpy as np
+from datetime import datetime
 
 
-
-
-# function to read data file and parse it into a pandas dataframe
-def readDatafile(dataFilePath):
-    
-    fileType = dataFilePath.split("/")[-1].split(".")[-1]
-    colNames = ["X", "Y"]
-    
-    # Parse if Excel file
-    if "xlsx" in fileType:
-        df = pd.read_excel(dataFilePath, header=None)
-        dataDF = df.rename(columns={0: "X", 1: "Y"})
-    
-    # Parse if Text file
-    elif "txt" in fileType:
-        with open(dataFilePath, encoding="UTF-8") as fp:
-            rawData = fp.readlines()
-        
-        data = []
-        for line in rawData:
-            data.append([float(x) for x in line.split()])
-            
-        
-        dataDF = pd.DataFrame(data, columns = colNames)
-    
-    else:
-        print("Unsure of file format??")
-        sys.exit()
-        
-    return dataDF
 
 
 # Read in file
@@ -59,8 +30,40 @@ if not dataFilePath: sys.exit()
 
 fileName = dataFilePath.split("/")[-1].split(".")[0]
 saveLocal = "/".join(dataFilePath.split("/")[0:-1])
-dataDF = readDatafile(dataFilePath)
 
+
+fileType = dataFilePath.split("/")[-1].split(".")[-1]
+colNames = ["X", "Y"]
+
+# Parse if Excel file
+if "xlsx" in fileType:
+    df = pd.read_excel(dataFilePath, header=None)
+    dataDF = df.rename(columns={0: "X", 1: "Y"})
+    
+startTime = dataDF["X"][0]
+
+# Convert timestamp column to running time
+dataDF["X"] = dataDF["X"].apply(lambda x: (x-startTime).total_seconds())
+
+# # Parse if Text file
+# elif "txt" in fileType:
+#     with open(dataFilePath, encoding="UTF-8") as fp:
+#         rawData = fp.readlines()
+    
+#     data = []
+#     for line in rawData:
+#         line = line.strip("\n").split()[-1] # Get second item, that is comma separated
+        
+#         line = [float(x) for x in line.split()] # Extract numbers only
+        
+#         data.append(line)
+        
+    
+#     dataDF = pd.DataFrame(data, columns = colNames)
+
+# else:
+#     print("Unsure of file format??")
+#     sys.exit()
 
 
 # Start performing auto-slope measuring anallysis
@@ -156,6 +159,7 @@ print(f"Delta Y: {yEnd - yStart}")
 print(f"Delta X: {xEnd - xStart}")
 print(f"Slope delY/delX: {slope}")
 
+print(f"Slope via deltaY/30: {(yEnd - yStart)/30}")
 
 index = 1
 fig1, ax1 = plt.subplots()

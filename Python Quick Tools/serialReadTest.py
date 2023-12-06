@@ -94,20 +94,21 @@ def readController(serialDataConnection):
     except:
         serialLine = 0
         print("Error in reading arduino line")
-        
+       
     return serialLine
 
 # CUSTOMIZABLE Function for cleaning the incoming data  
 # ******************************************************************
 def cleanData(data):
     
-    dataList = data.split()
+    dataList = data.split(",")
     cleanData = []
     
     for item in dataList:
         try:
             cleanData.append(float(item))
         except ValueError:
+            print("Value Error")
             pass
     
     if len(cleanData) == 1: cleanData = cleanData[0]
@@ -123,10 +124,10 @@ print(f"Serial ports connected: {serialPorts}")
 print(f"Serial port descriptions: {serialPortDescriptions}")
 
 # Manually select COM port
-COMport = "COM4"
+COMport = "COM7"
 baudRate = 115200
 
-saveFileLocal = "G:\My Drive\Documents\Projects\pythonToolsGithub"
+saveFileLocal = "G:\My Drive\Documents\Projects\pythonToolsGithub\Python Quick Tools"
 saveFileName = "TestSerial Read"
 
 txtSaveFileName = f"{saveFileName}.txt"
@@ -142,8 +143,6 @@ if not serialDataConnection:
 inWaiting = 0
 allData = []
 
-
-
 # Infinite loop for reading data
 while True:
     
@@ -151,11 +150,12 @@ while True:
     try:
         if inWaiting < serialDataConnection.in_waiting:
             data = readController(serialDataConnection)
-            data = cleanData(data)
             now = datetime.now()
+            data = cleanData(data)
+            data.insert(0,now)
             
             print(f"{now} {data}")
-            allData.append([now, data])
+            allData.append(data)
             with open(saveFileFullName, "a") as saveFile: saveFile.write(f"{now}, {data}\n")
     
     except KeyboardInterrupt:

@@ -110,10 +110,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.serialReadTimer.start()
         
         # Setup communication and save name and location
-        COMport = "COM4"
-        baudRate = 115200
-        saveName = "TestSerial Read"
-        self.saveFileLocal = "G:\My Drive\Documents\Projects\pythonToolsGithub"
+        COMport = "COM6"
+        baudRate = 9600
+        saveName = "30s vibe test"
+        self.saveFileLocal = "G:\My Drive\Documents\Purdue\GraduateSchool\Hybrid Additive Manufacturing HAM\HAM Tests\Deposition Mass Tests"
         
         # Add current datetime to savefile name, to keep files well documented
         saveFileDatetime = datetime.now().strftime("%Y-%m-%d %H-%M-%S")
@@ -164,6 +164,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.y.append(data)
             
     def cleanData(self, data):
+        
+        # print(f"RawRead: {data}")
             
         dataList = data.split()
         cleanData = []
@@ -175,6 +177,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 pass
         
         if len(cleanData) == 1: cleanData = cleanData[0]
+        else: cleanData = 0
+        
+        # print(f"Clean Data: {cleanData}")
         
         return cleanData
     

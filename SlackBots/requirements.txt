@@ -1,0 +1,7 @@
+openai
+requests
+Pillow
+python-dotenv
+slack-bolt
+slack-sdk
+flask

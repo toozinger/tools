@@ -103,12 +103,8 @@ class SummaryWorker(QThread):
             completion_tokens = response['usage']['completion_tokens']
             total_tokens = response['usage']['total_tokens']
 
-            print(f"Input tokens: {input_tokens}")
-            print(f"Completion tokens: {completion_tokens}")
-            print(f"Total tokens: {total_tokens}")
-
             self.finished.emit(summary_text, input_tokens,
-                               completion_tokens)  # Corrected line
+                               completion_tokens)
 
         except Exception as e:
             self.error.emit(str(e))
@@ -136,7 +132,7 @@ class AudioTranscriber(QMainWindow):
 
     def initUI(self):
         self.setWindowTitle('Audio to Text Converter')
-        self.setGeometry(100, 100, 600, 750)  # Increased height
+        self.setGeometry(100, 100, 600, 800)  # Increased height
 
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
@@ -153,11 +149,22 @@ class AudioTranscriber(QMainWindow):
         # Set range for determinate progress
         self.progress_bar.setRange(0, 100)
 
-        self.status_label = QLabel('Select an audio file to convert', self)
+        self.status_label = QLabel(
+            'Select an audio or transcription file', self)
         self.status_label.setAlignment(Qt.AlignCenter)
 
-        self.select_button = QPushButton('Select Audio File', self)
-        self.select_button.clicked.connect(self.select_file)
+        # File name display labels
+        self.audio_file_label = QLabel("Audio File: None", self)
+        self.transcription_file_label = QLabel(
+            "Transcription File: None", self)
+
+        self.select_audio_button = QPushButton('Select Audio File', self)
+        self.select_audio_button.clicked.connect(self.select_audio_file)
+
+        # New button for loading transcription
+        self.load_transcription_button = QPushButton(
+            'Load Transcription File', self)
+        self.load_transcription_button.clicked.connect(self.load_transcription)
 
         self.estimate_label = QLabel('Estimated Cost: N/A', self)
         self.estimate_label.setAlignment(Qt.AlignCenter)
@@ -210,7 +217,8 @@ class AudioTranscriber(QMainWindow):
 
         # Horizontal layout for buttons
         button_layout = QHBoxLayout()
-        button_layout.addWidget(self.select_button)
+        button_layout.addWidget(self.select_audio_button)
+        button_layout.addWidget(self.load_transcription_button)
         button_layout.addWidget(self.convert_button)
         button_layout.addWidget(self.summarize_button)
 
@@ -218,6 +226,9 @@ class AudioTranscriber(QMainWindow):
         layout.addWidget(self.console)
         layout.addWidget(self.progress_bar)
         layout.addWidget(self.status_label)
+        layout.addWidget(self.audio_file_label)  # Added audio file name label
+        # Added transcription file name label
+        layout.addWidget(self.transcription_file_label)
         layout.addWidget(self.estimate_label)
         layout.addWidget(self.length_label)
         layout.addWidget(self.model_label)
@@ -233,7 +244,7 @@ class AudioTranscriber(QMainWindow):
     def log_to_console(self, message):
         self.console.append(f"[{time.strftime('%H:%M:%S')}] {message}")
 
-    def select_file(self):
+    def select_audio_file(self):
         file_dialog = QFileDialog()
         file_path, _ = file_dialog.getOpenFileName(
             self,
@@ -244,13 +255,50 @@ class AudioTranscriber(QMainWindow):
 
         if file_path:
             self.audio_path = file_path
-            self.log_to_console(f"Selected file: {file_path}")
+            self.transcription_path = None  # Clear transcription path
+            self.transcribed_text = None  # Clear transcribed text
+            self.log_to_console(f"Selected audio file: {file_path}")
             self.status_label.setText(
                 f"File selected: {os.path.basename(file_path)}")
+            self.audio_file_label.setText(
+                f"Audio File: {os.path.basename(file_path)}")  # Update the audio file label
+            self.transcription_file_label.setText(
+                "Transcription File: None")  # Reset the transcription file label
             self.estimate_cost()
             self.convert_button.setEnabled(True)
-            self.summarize_button.setEnabled(
-                False)  # Disable until transcription is done
+            self.summarize_button.setEnabled(False)
+
+    def load_transcription(self):
+        file_dialog = QFileDialog()
+        file_path, _ = file_dialog.getOpenFileName(
+            self,
+            "Select Transcription File",
+            "",
+            "Text Files (*.txt)"
+        )
+
+        if file_path:
+            self.audio_path = None  # Clear audio path
+            self.audio_file_label.setText(
+                "Audio File: None")  # Reset audio label
+
+            self.transcription_path = file_path
+            try:
+                with open(file_path, 'r', encoding='utf-8') as file:
+                    self.transcribed_text = file.read()
+                self.log_to_console(f"Transcription loaded from: {file_path}")
+                self.status_label.setText(
+                    f"Transcription loaded from: {os.path.basename(file_path)}")
+                self.transcription_file_label.setText(
+                    f"Transcription File: {os.path.basename(file_path)}")  # Update the transcription file label
+                self.convert_button.setEnabled(False)
+                self.summarize_button.setEnabled(True)
+                self.estimate_summary_cost()  # Estimate cost based on loaded text
+                self.estimate_label.setText("Estimated Cost: N/A")
+                self.length_label.setText("Audio Length: N/A")
+
+            except Exception as e:
+                self.handle_error(f"Error loading transcription: {e}")
 
     def estimate_cost(self):
         if self.audio_path:
@@ -319,6 +367,9 @@ class AudioTranscriber(QMainWindow):
         self.log_to_console(
             f"Transcription saved to: {self.transcription_path}")
         self.status_label.setText('Transcription completed successfully!')
+        self.transcription_file_label.setText(os.path.basename(
+            self.transcription_path))  # Update transcription file label
+
         self.progress_bar.setVisible(False)
         self.convert_button.setEnabled(True)
         self.summarize_button.setEnabled(True)  # Enable summarize button

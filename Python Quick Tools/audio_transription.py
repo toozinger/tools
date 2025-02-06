@@ -3,7 +3,7 @@ import os
 from dotenv import load_dotenv
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QPushButton, QFileDialog,
                              QLabel, QVBoxLayout, QWidget, QTextEdit, QProgressBar,
-                             QHBoxLayout, QMessageBox, QLineEdit)
+                             QHBoxLayout, QMessageBox, QLineEdit, QRadioButton, QButtonGroup)
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
 import openai
 import time
@@ -76,11 +76,12 @@ class SummaryWorker(QThread):
     finished = pyqtSignal(str, int, int)
     error = pyqtSignal(str)
 
-    def __init__(self, api_key, transcription_text, prompt):
+    def __init__(self, api_key, transcription_text, prompt, model):
         super().__init__()
         self.api_key = api_key
         self.transcription_text = transcription_text
         self.prompt = prompt
+        self.model = model
         openai.api_key = self.api_key
 
     def run(self):
@@ -90,9 +91,8 @@ class SummaryWorker(QThread):
                 {"role": "user", "content": f"{self.prompt}\n\n{self.transcription_text}"}
             ]
 
-            model = "gpt-4o-mini"
             response = openai.ChatCompletion.create(
-                model=model,
+                model=self.model,
                 messages=messages,
                 max_tokens=2048,  # Adjust as needed
             )
@@ -125,6 +125,7 @@ class AudioTranscriber(QMainWindow):
         self.transcribed_text = None
         self.summary_input_tokens = 0
         self.summary_output_tokens = 0
+        self.selected_model = "gpt-4o-mini"  # Default model
         self.initUI()
 
         self.api_key = os.getenv('OPENAI_API_KEY')
@@ -135,7 +136,7 @@ class AudioTranscriber(QMainWindow):
 
     def initUI(self):
         self.setWindowTitle('Audio to Text Converter')
-        self.setGeometry(100, 100, 600, 700)  # Increased height
+        self.setGeometry(100, 100, 600, 750)  # Increased height
 
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
@@ -167,6 +168,23 @@ class AudioTranscriber(QMainWindow):
         self.convert_button = QPushButton('Convert', self)
         self.convert_button.clicked.connect(self.convert_audio)
         self.convert_button.setEnabled(False)
+
+        # Model Selection Radio Buttons
+        self.model_label = QLabel("Select Summarization Model:", self)
+        self.model_group = QButtonGroup()
+
+        self.model_mini_button = QRadioButton(
+            "gpt-4o-mini ($0.15/1M in, $0.30/1M out)", self)
+        self.model_4o_button = QRadioButton(
+            "gpt-4o ($2.5/1M in, $1.25/1M out)", self)
+
+        self.model_mini_button.setChecked(True)  # Set default selection
+
+        self.model_group.addButton(self.model_mini_button)
+        self.model_group.addButton(self.model_4o_button)
+
+        self.model_mini_button.toggled.connect(self.update_selected_model)
+        self.model_4o_button.toggled.connect(self.update_selected_model)
 
         # Added "Summarize" button
         self.summarize_button = QPushButton('Summarize', self)
@@ -202,6 +220,9 @@ class AudioTranscriber(QMainWindow):
         layout.addWidget(self.status_label)
         layout.addWidget(self.estimate_label)
         layout.addWidget(self.length_label)
+        layout.addWidget(self.model_label)
+        layout.addWidget(self.model_mini_button)
+        layout.addWidget(self.model_4o_button)
         layout.addWidget(self.token_estimate_label)
         layout.addWidget(self.token_usage_label)
         layout.addWidget(self.total_cost_label)
@@ -318,16 +339,32 @@ class AudioTranscriber(QMainWindow):
             self.token_estimate_label.setText("Estimated Summary Cost: N/A")
             return
 
-        # Estimate the cost to use gpt-4o-mini on the summary file
-        model_name = "gpt-4o-mini"
+        model_name = self.selected_model
         encoding = tiktoken.encoding_for_model(model_name)
 
         num_tokens = len(encoding.encode(self.transcribed_text))
-        cost_per_token = 0.15 / 1_000_000  # $0.15 per 1 million tokens
+
+        if self.selected_model == "gpt-4o-mini":
+            cost_per_token = 0.15 / 1_000_000  # $0.15 per 1 million tokens
+        elif self.selected_model == "gpt-4o":
+            cost_per_token = 2.5 / 1_000_000
+        else:
+            cost_per_token = 0  # should not happen
+
         estimated_cost = num_tokens * cost_per_token
 
         self.token_estimate_label.setText(
-            f"Estimated Summary Cost: ${estimated_cost:.4f}")
+            f"Estimated Summary Cost: ${estimated_cost:.4f} (Using {self.selected_model})")
+
+    def update_selected_model(self):
+        if self.model_mini_button.isChecked():
+            self.selected_model = "gpt-4o-mini"
+        elif self.model_4o_button.isChecked():
+            self.selected_model = "gpt-4o"
+        self.log_to_console(
+            f"Summarization model selected: {self.selected_model}")
+        if self.transcribed_text:
+            self.estimate_summary_cost()  # Recalculate cost when model changes
 
     def summarize_text(self):
         if not self.transcribed_text:
@@ -343,7 +380,7 @@ class AudioTranscriber(QMainWindow):
         self.progress_bar.setRange(0, 0)  # Indeterminate progress
 
         self.summary_worker = SummaryWorker(
-            self.api_key, self.transcribed_text, prompt)
+            self.api_key, self.transcribed_text, prompt, self.selected_model)
         self.summary_worker.finished.connect(self.handle_summary_complete)
         self.summary_worker.error.connect(self.handle_error)
         self.summary_worker.start()
@@ -367,11 +404,20 @@ class AudioTranscriber(QMainWindow):
         self.update_token_usage_label()
 
     def update_total_cost(self):
-        input_cost = (self.summary_input_tokens / 1_000_000) * 0.15
-        output_cost = (self.summary_output_tokens / 1_000_000) * 0.075
+        if self.selected_model == "gpt-4o-mini":
+            input_cost = (self.summary_input_tokens / 1_000_000) * 0.15
+            output_cost = (self.summary_output_tokens / 1_000_000) * 0.30
+        elif self.selected_model == "gpt-4o":
+            input_cost = (self.summary_input_tokens / 1_000_000) * 2.5
+            output_cost = (self.summary_output_tokens / 1_000_000) * 1.25
+        else:
+            input_cost = 0
+            output_cost = 0
+
         total_cost = input_cost + output_cost
         self.total_cost = total_cost
-        self.total_cost_label.setText(f"Total Cost: ${total_cost:.4f}")
+        self.total_cost_label.setText(
+            f"Total Cost: ${total_cost:.4f} (Using {self.selected_model})")
 
     def update_token_usage_label(self):
         self.token_usage_label.setText(

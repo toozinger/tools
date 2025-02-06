@@ -1,20 +1,23 @@
 import sys
 import os
-from dotenv import load_dotenv
-from PyQt5.QtWidgets import (QApplication, QMainWindow, QPushButton, QFileDialog,
-                             QLabel, QVBoxLayout, QWidget, QTextEdit, QProgressBar,
-                             QHBoxLayout, QMessageBox, QLineEdit, QRadioButton, QButtonGroup)
-from PyQt5.QtCore import Qt, QThread, pyqtSignal
-import openai
 import time
 import math
 import audioread
 import tiktoken
 
+from dotenv import load_dotenv
+from PyQt5.QtWidgets import (QApplication, QMainWindow, QPushButton, QFileDialog,
+                             QLabel, QVBoxLayout, QWidget, QTextEdit, QProgressBar,
+                             QHBoxLayout, QMessageBox, QLineEdit, QRadioButton, QButtonGroup,
+                             QGridLayout, QTabWidget)
+from PyQt5.QtCore import Qt, QThread, pyqtSignal
+
+import openai
 
 load_dotenv()
 
 
+# --- Worker Threads ---
 class TranscriptionWorker(QThread):
     finished = pyqtSignal(str)
     error = pyqtSignal(str)
@@ -72,7 +75,6 @@ class AudioLoadingWorker(QThread):
 
 
 class SummaryWorker(QThread):
-    # Emit summary, input tokens, output tokens
     finished = pyqtSignal(str, int, int)
     error = pyqtSignal(str)
 
@@ -87,8 +89,11 @@ class SummaryWorker(QThread):
     def run(self):
         try:
             messages = [
-                {"role": "system", "content": "You are a helpful assistant."},
-                {"role": "user", "content": f"{self.prompt}\n\n{self.transcription_text}"}
+                {"role": "system",
+                 "content":
+                 "You are a helpful assistant. Only output the user request."},
+                {"role": "user",
+                 "content": f"{self.prompt}\n\n{self.transcription_text}"}
             ]
 
             response = openai.ChatCompletion.create(
@@ -110,9 +115,12 @@ class SummaryWorker(QThread):
             self.error.emit(str(e))
 
 
+# --- Main Application ---
 class AudioTranscriber(QMainWindow):
     def __init__(self):
         super().__init__()
+
+        # Initialize data members
         self.audio_path = None
         self.transcription_path = None
         self.estimated_cost = None
@@ -122,36 +130,44 @@ class AudioTranscriber(QMainWindow):
         self.summary_input_tokens = 0
         self.summary_output_tokens = 0
         self.selected_model = "gpt-4o-mini"  # Default model
-        self.initUI()
 
+        # API Key
         self.api_key = os.getenv('OPENAI_API_KEY')
         if not self.api_key:
             QMessageBox.critical(
                 self, "Error", "API key not found in .env file")
             sys.exit(1)
 
+        self.initUI()
+
     def initUI(self):
         self.setWindowTitle('Audio to Text Converter')
-        self.setGeometry(100, 100, 600, 800)  # Increased height
+        self.setGeometry(100, 100, 800, 600)
 
-        central_widget = QWidget()
-        self.setCentralWidget(central_widget)
-        layout = QVBoxLayout(central_widget)
+        self.central_widget = QWidget()
+        self.setCentralWidget(self.central_widget)
 
-        # Create console display
-        self.console = QTextEdit(self)
-        self.console.setReadOnly(True)
-        self.console.setStyleSheet("background-color: #f0f0f0;")
+        self.main_layout = QVBoxLayout(self.central_widget)
 
-        # Create indeterminate progress bar
-        self.progress_bar = QProgressBar(self)
-        self.progress_bar.setVisible(False)
-        # Set range for determinate progress
-        self.progress_bar.setRange(0, 100)
+        # Create Tabs
+        self.tabs = QTabWidget()
+        self.transcription_tab = QWidget()
+        self.summary_tab = QWidget()
+        self.tabs.addTab(self.transcription_tab, "Transcription")
+        self.tabs.addTab(self.summary_tab, "Summary")
 
-        self.status_label = QLabel(
-            'Select an audio or transcription file', self)
-        self.status_label.setAlignment(Qt.AlignCenter)
+        self.main_layout.addWidget(self.tabs)
+
+        self.init_transcription_tab()
+        self.init_summary_tab()
+
+        self.init_common_elements()  # Progress bar, status label, console
+        self.main_layout.addWidget(self.progress_bar)
+        self.main_layout.addWidget(self.status_label)
+        self.main_layout.addWidget(self.console)
+
+    def init_transcription_tab(self):
+        self.transcription_layout = QGridLayout(self.transcription_tab)
 
         # File name display labels
         self.audio_file_label = QLabel("Audio File: None", self)
@@ -161,20 +177,41 @@ class AudioTranscriber(QMainWindow):
         self.select_audio_button = QPushButton('Select Audio File', self)
         self.select_audio_button.clicked.connect(self.select_audio_file)
 
+        self.convert_button = QPushButton('Convert', self)
+        self.convert_button.clicked.connect(self.convert_audio)
+        self.convert_button.setEnabled(False)
+
+        # Layout
+        self.transcription_layout.addWidget(self.audio_file_label, 0, 0, 1, 2)
+        self.transcription_layout.addWidget(
+            self.transcription_file_label, 1, 0, 1, 2)
+        self.transcription_layout.addWidget(self.select_audio_button, 2, 0)
+        self.transcription_layout.addWidget(self.convert_button, 3, 0, 1, 2)
+
+        # Stretch last row
+        self.transcription_layout.setRowStretch(6, 1)
+
+    def init_summary_tab(self):
+        self.summary_layout = QVBoxLayout(self.summary_tab)
+
+        # Added Transcription File elements
+        self.transcription_file_label_summary = QLabel(
+            "Transcription File: None", self)
+
         # New button for loading transcription
         self.load_transcription_button = QPushButton(
             'Load Transcription File', self)
         self.load_transcription_button.clicked.connect(self.load_transcription)
+
+        # Added Token Estimate Label
+        self.token_estimate_label = QLabel('Estimated Summary Cost: N/A', self)
+        self.token_estimate_label.setAlignment(Qt.AlignCenter)
 
         self.estimate_label = QLabel('Estimated Cost: N/A', self)
         self.estimate_label.setAlignment(Qt.AlignCenter)
 
         self.length_label = QLabel('Audio Length: N/A', self)
         self.length_label.setAlignment(Qt.AlignCenter)
-
-        self.convert_button = QPushButton('Convert', self)
-        self.convert_button.clicked.connect(self.convert_audio)
-        self.convert_button.setEnabled(False)
 
         # Model Selection Radio Buttons
         self.model_label = QLabel("Select Summarization Model:", self)
@@ -199,10 +236,6 @@ class AudioTranscriber(QMainWindow):
         self.summarize_button.setEnabled(False)  # Disabled initially
 
         # Added Token Estimate Label
-        self.token_estimate_label = QLabel('Estimated Summary Cost: N/A', self)
-        self.token_estimate_label.setAlignment(Qt.AlignCenter)
-
-        # Added Token Estimate Label
         self.token_usage_label = QLabel('Token Usage', self)
         self.token_usage_label.setAlignment(Qt.AlignCenter)
 
@@ -215,31 +248,38 @@ class AudioTranscriber(QMainWindow):
         self.prompt_input = QLineEdit(self)
         self.prompt_input.setText("create a summary of my meeting")
 
-        # Horizontal layout for buttons
-        button_layout = QHBoxLayout()
-        button_layout.addWidget(self.select_audio_button)
-        button_layout.addWidget(self.load_transcription_button)
-        button_layout.addWidget(self.convert_button)
-        button_layout.addWidget(self.summarize_button)
-
         # Add widgets to layout
-        layout.addWidget(self.console)
-        layout.addWidget(self.progress_bar)
-        layout.addWidget(self.status_label)
-        layout.addWidget(self.audio_file_label)  # Added audio file name label
-        # Added transcription file name label
-        layout.addWidget(self.transcription_file_label)
-        layout.addWidget(self.estimate_label)
-        layout.addWidget(self.length_label)
-        layout.addWidget(self.model_label)
-        layout.addWidget(self.model_mini_button)
-        layout.addWidget(self.model_4o_button)
-        layout.addWidget(self.token_estimate_label)
-        layout.addWidget(self.token_usage_label)
-        layout.addWidget(self.total_cost_label)
-        layout.addWidget(self.prompt_label)
-        layout.addWidget(self.prompt_input)
-        layout.addLayout(button_layout)
+        self.summary_layout.addWidget(self.transcription_file_label_summary)
+        self.summary_layout.addWidget(self.load_transcription_button)
+        self.summary_layout.addWidget(self.estimate_label)
+        self.summary_layout.addWidget(self.length_label)
+        self.summary_layout.addWidget(self.model_label)
+        self.summary_layout.addWidget(self.model_mini_button)
+        self.summary_layout.addWidget(self.model_4o_button)
+        self.summary_layout.addWidget(self.token_estimate_label)
+        self.summary_layout.addWidget(self.token_usage_label)
+        self.summary_layout.addWidget(self.total_cost_label)
+        self.summary_layout.addWidget(self.prompt_label)
+        self.summary_layout.addWidget(self.prompt_input)
+        self.summary_layout.addWidget(self.summarize_button)
+        self.summary_layout.addStretch(1)  # Add stretch at the end
+
+    def init_common_elements(self):
+        # Console display
+        self.console = QTextEdit(self)
+        self.console.setReadOnly(True)
+        self.console.setStyleSheet("background-color: #f0f0f0;")
+
+        # Progress bar
+        self.progress_bar = QProgressBar(self)
+        self.progress_bar.setVisible(False)
+        # Set range for determinate progress
+        self.progress_bar.setRange(0, 100)
+
+        # Status label
+        self.status_label = QLabel(
+            'Select an audio or transcription file', self)
+        self.status_label.setAlignment(Qt.AlignCenter)
 
     def log_to_console(self, message):
         self.console.append(f"[{time.strftime('%H:%M:%S')}] {message}")
@@ -290,6 +330,8 @@ class AudioTranscriber(QMainWindow):
                 self.status_label.setText(
                     f"Transcription loaded from: {os.path.basename(file_path)}")
                 self.transcription_file_label.setText(
+                    f"Transcription File: {os.path.basename(file_path)}")  # Update the transcription file label
+                self.transcription_file_label_summary.setText(
                     f"Transcription File: {os.path.basename(file_path)}")  # Update the transcription file label
                 self.convert_button.setEnabled(False)
                 self.summarize_button.setEnabled(True)
@@ -367,8 +409,11 @@ class AudioTranscriber(QMainWindow):
         self.log_to_console(
             f"Transcription saved to: {self.transcription_path}")
         self.status_label.setText('Transcription completed successfully!')
-        self.transcription_file_label.setText(os.path.basename(
-            self.transcription_path))  # Update transcription file label
+
+        self.transcription_file_label.setText(
+            f"Transcription File: {os.path.basename(self.transcription_path)}")
+        self.transcription_file_label_summary.setText(
+            f"Transcription File: {os.path.basename(self.transcription_path)}")
 
         self.progress_bar.setVisible(False)
         self.convert_button.setEnabled(True)

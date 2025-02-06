@@ -4,119 +4,105 @@ import time
 import math
 import audioread
 import tiktoken
+import io
+import subprocess
+import concurrent.futures
 
 from dotenv import load_dotenv
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QPushButton, QFileDialog,
                              QLabel, QVBoxLayout, QWidget, QTextEdit, QProgressBar,
                              QHBoxLayout, QMessageBox, QLineEdit, QRadioButton, QButtonGroup,
                              QGridLayout, QTabWidget)
-from PyQt5.QtCore import Qt, QThread, pyqtSignal
+from PyQt5.QtCore import Qt, pyqtSignal, QCoreApplication
 
 import openai
 
 load_dotenv()
 
 
-# --- Worker Threads ---
-class TranscriptionWorker(QThread):
-    finished = pyqtSignal(str)
-    error = pyqtSignal(str)
+# --- Functions (No More QThreads) ---
+def transcribe_audio(api_key, audio_path, audio_chunk):
+    """Transcribes a single audio chunk."""
+    openai.api_key = api_key
+    try:
+        audio_buffer = io.BytesIO(audio_chunk)
+        audio_buffer.name = "chunk.mp3"  # Required by OpenAI
 
-    def __init__(self, api_key, audio_path):
-        super().__init__()
-        self.api_key = api_key
-        self.audio_path = audio_path
-        openai.api_key = self.api_key
-
-    def run(self):
-        try:
-            with open(self.audio_path, 'rb') as audio_file:
-                response = openai.Audio.transcribe(
-                    model="whisper-1",
-                    file=audio_file
-                )
-            self.finished.emit(response['text'])
-        except Exception as e:
-            self.error.emit(str(e))
+        files = {"file": audio_buffer}
+        data = {"model": "whisper-1"}
+        response = openai.Audio.transcribe(**files, **data)
+        return response['text']
+    except Exception as e:
+        raise e  # Re-raise exception to be handled by caller
 
 
-class AudioLoadingWorker(QThread):
-    finished = pyqtSignal(float)
-    error = pyqtSignal(str)
-    progress = pyqtSignal(int)
+def load_audio_duration(audio_path, progress_callback, error_callback):
+    """Loads audio file and returns duration in seconds."""
+    try:
+        with audioread.audio_open(audio_path) as f:
+            total_frames = int(f.channels * f.samplerate * f.duration)
+            block_size = f.channels * f.samplerate  # One second chunks
+            num_blocks = int(f.duration)  # Number of seconds
+            update_interval = max(1, num_blocks // 100)
 
-    def __init__(self, audio_path):
-        super().__init__()
-        self.audio_path = audio_path
+            for i in range(num_blocks):
+                try:
+                    f.read_data(block_size)
+                except audioread.exceptions.NoBackendError as e:
+                    error_callback(f"Audio backend error: {e}")
+                    return None  # Signal error
+                if (i + 1) % update_interval == 0 or i == num_blocks - 1:
+                    progress_percentage = int(((i + 1) / num_blocks) * 100)
+                    progress_callback(progress_percentage)
 
-    def run(self):
-        try:
-            with audioread.audio_open(self.audio_path) as f:
-                total_frames = int(f.channels * f.samplerate * f.duration)
-                block_size = f.channels * f.samplerate  # One second chunks
-                num_blocks = int(f.duration)  # Number of seconds
+            return f.duration
 
-                for i in range(num_blocks):
-                    try:
-                        f.read_data(block_size)  # Read a block of audio data
-                    except audioread.exceptions.NoBackendError as e:
-                        self.error.emit(f"Audio backend error: {e}")
-                        return  # Exit if backend error
-
-                    progress_percentage = int((i / num_blocks) * 100)
-                    self.progress.emit(progress_percentage)
-
-                self.finished.emit(f.duration)
-
-        except audioread.exceptions.UnsupportedAudioFile as e:
-            self.error.emit(f"Unsupported audio file: {e}")
-        except Exception as e:
-            self.error.emit(str(e))
+    except audioread.exceptions.UnsupportedAudioFile as e:
+        error_callback(f"Unsupported audio file: {e}")
+        return None
+    except Exception as e:
+        error_callback(str(e))
+        return None
 
 
-class SummaryWorker(QThread):
-    finished = pyqtSignal(str, int, int)
-    error = pyqtSignal(str)
+def summarize_text(api_key, transcription_text, prompt, model):
+    """Summarizes the given text using OpenAI ChatCompletion."""
+    openai.api_key = api_key
+    try:
+        messages = [
+            {"role": "system",
+             "content":
+             "You are a helpful assistant. Only output the user request."},
+            {"role": "user",
+             "content": f"{prompt}\n\n{transcription_text}"}
+        ]
 
-    def __init__(self, api_key, transcription_text, prompt, model):
-        super().__init__()
-        self.api_key = api_key
-        self.transcription_text = transcription_text
-        self.prompt = prompt
-        self.model = model
-        openai.api_key = self.api_key
+        response = openai.ChatCompletion.create(
+            model=model,
+            messages=messages,
+            max_tokens=2048,  # Adjust as needed
+        )
+        summary_text = response['choices'][0]['message']['content']
 
-    def run(self):
-        try:
-            messages = [
-                {"role": "system",
-                 "content":
-                 "You are a helpful assistant. Only output the user request."},
-                {"role": "user",
-                 "content": f"{self.prompt}\n\n{self.transcription_text}"}
-            ]
+        # Token Usage Info
+        input_tokens = response['usage']['prompt_tokens']
+        completion_tokens = response['usage']['completion_tokens']
+        total_tokens = response['usage']['total_tokens']
 
-            response = openai.ChatCompletion.create(
-                model=self.model,
-                messages=messages,
-                max_tokens=2048,  # Adjust as needed
-            )
-            summary_text = response['choices'][0]['message']['content']
+        return summary_text, input_tokens, completion_tokens
 
-            # Token Usage Info
-            input_tokens = response['usage']['prompt_tokens']
-            completion_tokens = response['usage']['completion_tokens']
-            total_tokens = response['usage']['total_tokens']
-
-            self.finished.emit(summary_text, input_tokens,
-                               completion_tokens)
-
-        except Exception as e:
-            self.error.emit(str(e))
+    except Exception as e:
+        raise e
 
 
 # --- Main Application ---
 class AudioTranscriber(QMainWindow):
+    # Signals for updating the UI from long operations
+    loading_progress = pyqtSignal(int)
+    transcription_complete = pyqtSignal(str)  # Pass transcribed text
+    summary_complete = pyqtSignal(str, int, int)
+    error_signal = pyqtSignal(str)
+
     def __init__(self):
         super().__init__()
 
@@ -126,12 +112,11 @@ class AudioTranscriber(QMainWindow):
         self.estimated_cost = None
         self.summary_cost = None
         self.audio_length_seconds = None
-        self.transcribed_text = None
+        self.transcribed_text = ""
         self.summary_input_tokens = 0
         self.summary_output_tokens = 0
         self.selected_model = "gpt-4o-mini"  # Default model
-
-        # API Key
+        self.chunk_size = 20 * 1024 * 1024  # 20MB
         self.api_key = os.getenv('OPENAI_API_KEY')
         if not self.api_key:
             QMessageBox.critical(
@@ -139,6 +124,9 @@ class AudioTranscriber(QMainWindow):
             sys.exit(1)
 
         self.initUI()
+
+        # Thread Pool for background tasks
+        self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
 
     def initUI(self):
         self.setWindowTitle('Audio to Text Converter')
@@ -161,10 +149,17 @@ class AudioTranscriber(QMainWindow):
         self.init_transcription_tab()
         self.init_summary_tab()
 
-        self.init_common_elements()  # Progress bar, status label, console
+        self.init_common_elements()
+
         self.main_layout.addWidget(self.progress_bar)
         self.main_layout.addWidget(self.status_label)
         self.main_layout.addWidget(self.console)
+
+        # Connect Signals to Slots
+        self.loading_progress.connect(self.update_loading_progress)
+        self.transcription_complete.connect(self.handle_transcription_complete)
+        self.summary_complete.connect(self.handle_summary_complete)
+        self.error_signal.connect(self.handle_error)
 
     def init_transcription_tab(self):
         self.transcription_layout = QGridLayout(self.transcription_tab)
@@ -182,7 +177,7 @@ class AudioTranscriber(QMainWindow):
         self.select_audio_button.clicked.connect(self.select_audio_file)
 
         self.convert_button = QPushButton('Convert', self)
-        self.convert_button.clicked.connect(self.convert_audio)
+        self.convert_button.clicked.connect(self.start_transcription)
         self.convert_button.setEnabled(False)
 
         # Layout
@@ -223,7 +218,7 @@ class AudioTranscriber(QMainWindow):
         self.model_4o_button = QRadioButton(
             "gpt-4o ($2.5/1M in, $1.25/1M out)", self)
 
-        self.model_mini_button.setChecked(True)  # Set default selection
+        self.model_mini_button.setChecked(True)  # Default selection
 
         self.model_group.addButton(self.model_mini_button)
         self.model_group.addButton(self.model_4o_button)
@@ -261,7 +256,7 @@ class AudioTranscriber(QMainWindow):
         self.summary_layout.addWidget(self.prompt_label)
         self.summary_layout.addWidget(self.prompt_input)
         self.summary_layout.addWidget(self.summarize_button)
-        self.summary_layout.addStretch(1)  # Add stretch at the end
+        self.summary_layout.addStretch(1)
 
     def init_common_elements(self):
         # Console display
@@ -272,7 +267,6 @@ class AudioTranscriber(QMainWindow):
         # Progress bar
         self.progress_bar = QProgressBar(self)
         self.progress_bar.setVisible(False)
-        # Set range for determinate progress
         self.progress_bar.setRange(0, 100)
 
         # Status label
@@ -282,6 +276,7 @@ class AudioTranscriber(QMainWindow):
 
     def log_to_console(self, message):
         self.console.append(f"[{time.strftime('%H:%M:%S')}] {message}")
+        QCoreApplication.processEvents()
 
     def select_audio_file(self):
         file_dialog = QFileDialog()
@@ -294,15 +289,14 @@ class AudioTranscriber(QMainWindow):
 
         if file_path:
             self.audio_path = file_path
-            self.transcription_path = None  # Clear transcription path
-            self.transcribed_text = None  # Clear transcribed text
+            self.transcription_path = None
+            self.transcribed_text = ""
             self.log_to_console(f"Selected audio file: {file_path}")
             self.status_label.setText(
                 f"File selected: {os.path.basename(file_path)}")
             self.audio_file_label.setText(
-                f"Audio File: {os.path.basename(file_path)}")  # Update the audio file label
-            self.transcription_file_label.setText(
-                "Transcription File: None")  # Reset the transcription file label
+                f"Audio File: {os.path.basename(file_path)}")
+            self.transcription_file_label.setText("Transcription File: None")
             self.estimate_cost()
             self.convert_button.setEnabled(True)
             self.summarize_button.setEnabled(False)
@@ -317,9 +311,8 @@ class AudioTranscriber(QMainWindow):
         )
 
         if file_path:
-            self.audio_path = None  # Clear audio path
-            self.audio_file_label.setText(
-                "Audio File: None")  # Reset audio label
+            self.audio_path = None
+            self.audio_file_label.setText("Audio File: None")
 
             self.transcription_path = file_path
             try:
@@ -329,79 +322,168 @@ class AudioTranscriber(QMainWindow):
                 self.status_label.setText(
                     f"Transcription loaded from: {os.path.basename(file_path)}")
                 self.transcription_file_label.setText(
-                    f"Transcription File: {os.path.basename(file_path)}")  # Update the transcription file label
+                    f"Transcription File: {os.path.basename(file_path)}")
                 self.transcription_file_label_summary.setText(
-                    f"Transcription File: {os.path.basename(file_path)}")  # Update the transcription file label
+                    f"Transcription File: {os.path.basename(file_path)}")
                 self.convert_button.setEnabled(False)
                 self.summarize_button.setEnabled(True)
-                self.estimate_summary_cost()  # Estimate cost based on loaded text
+                self.estimate_summary_cost()
             except Exception as e:
                 self.handle_error(f"Error loading transcription: {e}")
 
     def estimate_cost(self):
         if self.audio_path:
             self.progress_bar.setVisible(True)
-            self.progress_bar.setRange(0, 100)
+            self.progress_bar.setRange(0, 0)
+            self.progress_bar.setValue(0)
             self.log_to_console("Loading audio file...")
             self.status_label.setText('Loading audio file...')
+            QCoreApplication.processEvents()
 
-            self.audio_loading_worker = AudioLoadingWorker(self.audio_path)
-            self.audio_loading_worker.finished.connect(
-                self.handle_audio_loaded)
-            self.audio_loading_worker.error.connect(self.handle_error)
-            self.audio_loading_worker.progress.connect(
-                self.update_loading_progress)
-            self.audio_loading_worker.start()
+            # Submit to the thread pool
+            future = self.executor.submit(
+                load_audio_duration,
+                self.audio_path,
+                self.loading_progress.emit,
+                self.error_signal.emit
+            )
+
+            # Handle the result when it's available
+            future.add_done_callback(self.handle_audio_loaded)
+
         else:
             self.estimated_cost = None
             self.audio_length_seconds = None
 
     def update_loading_progress(self, progress):
         self.progress_bar.setValue(progress)
+        QCoreApplication.processEvents()
 
-    def handle_audio_loaded(self, duration):
-        self.audio_length_seconds = duration
-        duration_minutes = self.audio_length_seconds / 60
-        self.estimated_cost = 0.006 * math.ceil(duration_minutes)
-        # Format audio length to HH:MM:SS
-        hours = int(self.audio_length_seconds // 3600)
-        minutes = int((self.audio_length_seconds % 3600) // 60)
-        seconds = int(self.audio_length_seconds % 60)
-        formatted_duration = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+    def handle_audio_loaded(self, future):
+        """Called when load_audio_duration is complete."""
+        try:
+            duration = future.result()  # Get result or exception
+            if duration is None:
+                return  # Error already handled
 
-        self.length_label.setText(f"Audio Length: {formatted_duration}")
-        self.estimate_label.setText(
-            f"Estimated Cost: ${self.estimated_cost:.4f}")
-        self.progress_bar.setVisible(False)
-        self.status_label.setText(
-            f"File selected: {os.path.basename(self.audio_path)}")
-        self.log_to_console("Audio file loaded.")
+            self.audio_length_seconds = duration
+            duration_minutes = self.audio_length_seconds / 60
+            self.estimated_cost = 0.006 * math.ceil(duration_minutes)
 
-    def convert_audio(self):
-        if self.audio_path:
-            self.log_to_console("Starting conversion...")
-            self.status_label.setText('Converting audio to text...')
-            self.progress_bar.setVisible(True)
-            self.progress_bar.setRange(0, 0)  # Makes it indeterminate
-            self.convert_audio_to_text(self.audio_path)
-            self.convert_button.setEnabled(False)
-            self.summarize_button.setEnabled(
-                False)  # Disable until transcription is done
+            hours = int(self.audio_length_seconds // 3600)
+            minutes = int((self.audio_length_seconds % 3600) // 60)
+            seconds = int(self.audio_length_seconds % 60)
+            formatted_duration = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
-    def convert_audio_to_text(self, audio_path):
-        # Create and start worker thread
-        self.worker = TranscriptionWorker(self.api_key, audio_path)
-        self.worker.finished.connect(
-            lambda text: self.handle_transcription_complete(text, audio_path))
-        self.worker.error.connect(self.handle_error)
-        self.worker.start()
+            self.length_label.setText(f"Audio Length: {formatted_duration}")
+            self.estimate_label.setText(
+                f"Estimated Cost: ${self.estimated_cost:.4f}")
+            self.progress_bar.setVisible(False)
+            self.status_label.setText(
+                f"File selected: {os.path.basename(self.audio_path)}")
+            self.log_to_console("Audio file loaded.")
+            QCoreApplication.processEvents()
 
-    def handle_transcription_complete(self, transcribed_text, audio_path):
-        # Create output file path
-        file_path_without_ext = os.path.splitext(audio_path)[0]
+        except Exception as e:
+            self.error_signal.emit(str(e))
+
+    def start_transcription(self):
+        if not self.audio_path:
+            return
+
+        self.log_to_console("Starting conversion...")
+        self.status_label.setText('Converting audio to text...')
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setRange(0, 0)  # Indeterminate progress
+        self.convert_button.setEnabled(False)
+        self.summarize_button.setEnabled(False)
+        QCoreApplication.processEvents()
+
+        # Convert audio to optimal format
+        converted_audio_path = self.convert_audio_format(self.audio_path)
+        if converted_audio_path:
+            self.log_to_console(
+                f"Using converted audio file: {converted_audio_path}")
+            self.audio_path = converted_audio_path
+        else:
+            self.handle_error("Audio conversion failed.")
+            return
+
+        # Transcribe in the background
+        self.executor.submit(self.transcribe_in_chunks, self.audio_path)
+
+    def convert_audio_format(self, input_path):
+        """Converts audio to MP3 using FFmpeg, optimized for transcription."""
+        output_path = os.path.splitext(input_path)[
+            0] + "_converted.mp3"  # Create a new name
+        try:
+            # Example FFmpeg command: Adjust parameters as needed.
+            command = [
+                'ffmpeg',
+                '-y',  # Add -y to automatically overwrite existing files
+                '-i', input_path,
+                '-vn',  # Disable video
+                '-acodec', 'libmp3lame',  # Use MP3 encoder
+                '-ac', '1',  # Mono audio
+                '-ar', '16000',  # 16kHz sample rate
+                '-ab', '128k',  # Audio bitrate
+                output_path
+            ]
+
+            subprocess.run(command, check=True,
+                           capture_output=True)  # Raise exception on error
+            return output_path
+        except subprocess.CalledProcessError as e:
+            self.log_to_console(f"FFmpeg error: {e.stderr.decode()}")
+            return None
+        except FileNotFoundError:
+            self.error_signal.emit(
+                "FFmpeg not found. Please ensure it is installed and in your system's PATH.")
+            return None
+
+    def transcribe_in_chunks(self, audio_path):
+        """Transcribes the audio file in chunks, sequentially."""
+        chunk_size = self.chunk_size
+        try:
+            with open(audio_path, 'rb') as audio_file:
+                audio_data = audio_file.read()
+        except Exception as e:
+            self.error_signal.emit(f"Error reading audio file: {e}")
+            return
+
+        total_size = len(audio_data)
+        num_chunks = math.ceil(total_size / chunk_size)
+        transcribed_text = ""
+
+        for i in range(num_chunks):
+            start = i * chunk_size
+            end = min(start + chunk_size, total_size)
+            audio_chunk = audio_data[start:end]
+
+            try:
+                text = transcribe_audio(self.api_key, audio_path, audio_chunk)
+                transcribed_text += text
+                progress_percentage = int(((i + 1) / num_chunks) * 100)
+                QCoreApplication.processEvents()  # Update GUI
+                self.loading_progress.emit(progress_percentage)
+                self.log_to_console(f"Completed chunk {i+1}/{num_chunks}")
+
+                # Estimate summary cost after each chunk
+                self.transcribed_text = transcribed_text
+                self.estimate_summary_cost()
+
+            except Exception as e:
+                self.error_signal.emit(f"Transcription error: {e}")
+                return
+
+        # All chunks processed
+        self.transcription_complete.emit(transcribed_text)  # Pass text
+
+    def handle_transcription_complete(self, transcribed_text):
+        """Handles transcription completion."""
+        file_path_without_ext = os.path.splitext(self.audio_path)[0]
         self.transcription_path = f"{file_path_without_ext}_transcription.txt"
 
-        # Save the transcribed text
         with open(self.transcription_path, 'w', encoding='utf-8') as text_file:
             text_file.write(transcribed_text)
 
@@ -416,10 +498,11 @@ class AudioTranscriber(QMainWindow):
 
         self.progress_bar.setVisible(False)
         self.convert_button.setEnabled(True)
-        self.summarize_button.setEnabled(True)  # Enable summarize button
+        self.summarize_button.setEnabled(True)
+        QCoreApplication.processEvents()
 
-        self.transcribed_text = transcribed_text
-        self.estimate_summary_cost()  # Estimate after transcription
+        self.transcribed_text = transcribed_text  # Store the transcribed text
+        self.estimate_summary_cost()  # Estimate cost after transcription
 
     def estimate_summary_cost(self):
         if not self.transcribed_text:
@@ -466,24 +549,36 @@ class AudioTranscriber(QMainWindow):
         self.progress_bar.setVisible(True)
         self.progress_bar.setRange(0, 0)  # Indeterminate progress
 
-        self.summary_worker = SummaryWorker(
-            self.api_key, self.transcribed_text, prompt, self.selected_model)
-        self.summary_worker.finished.connect(self.handle_summary_complete)
-        self.summary_worker.error.connect(self.handle_error)
-        self.summary_worker.start()
+        # Start summarization in background
+        future = self.executor.submit(
+            summarize_text,
+            self.api_key,
+            self.transcribed_text,
+            prompt,
+            self.selected_model
+        )
+        future.add_done_callback(self.handle_summary_task_complete)
+
+    def handle_summary_task_complete(self, future):
+        try:
+            summary_text, input_tokens, output_tokens = future.result()
+            self.summary_complete.emit(summary_text, input_tokens,
+                                       output_tokens)
+        except Exception as e:
+            self.error_signal.emit(f"Summary error: {e}")
 
     def handle_summary_complete(self, summary_text, input_tokens, output_tokens):
-        # Create output file path
+        """Handles summary completion."""
         file_path_without_ext = os.path.splitext(self.audio_path)[0]
         summary_path = f"{file_path_without_ext}_AI_summary.txt"
 
-        # Save the summary text
         with open(summary_path, 'w', encoding='utf-8') as text_file:
             text_file.write(summary_text)
 
         self.log_to_console(f"Summary saved to: {summary_path}")
         self.status_label.setText('Summary completed successfully!')
         self.progress_bar.setVisible(False)
+        QCoreApplication.processEvents()
 
         self.summary_input_tokens = input_tokens
         self.summary_output_tokens = output_tokens
@@ -505,10 +600,12 @@ class AudioTranscriber(QMainWindow):
         self.total_cost = total_cost
         self.total_cost_label.setText(
             f"Total Cost: ${total_cost:.4f} (Using {self.selected_model})")
+        QCoreApplication.processEvents()
 
     def update_token_usage_label(self):
         self.token_usage_label.setText(
             f"Input Tokens: {self.summary_input_tokens}, Output Tokens: {self.summary_output_tokens}")
+        QCoreApplication.processEvents()
 
     def handle_error(self, error_message):
         self.log_to_console(f"Error: {error_message}")
@@ -516,8 +613,11 @@ class AudioTranscriber(QMainWindow):
         self.progress_bar.setVisible(False)
         self.convert_button.setEnabled(True)
         self.summarize_button.setEnabled(True)
+        QCoreApplication.processEvents()
 
     def closeEvent(self, event):
+        # Shutdown the thread pool
+        self.executor.shutdown()
         event.accept()
         QApplication.quit()
 

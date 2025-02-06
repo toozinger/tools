@@ -174,6 +174,10 @@ class AudioTranscriber(QMainWindow):
         self.transcription_file_label = QLabel(
             "Transcription File: None", self)
 
+        # Labels for displaying audio length and cost
+        self.length_label = QLabel('Audio Length: N/A', self)
+        self.estimate_label = QLabel('Estimated Cost: N/A', self)
+
         self.select_audio_button = QPushButton('Select Audio File', self)
         self.select_audio_button.clicked.connect(self.select_audio_file)
 
@@ -187,6 +191,9 @@ class AudioTranscriber(QMainWindow):
             self.transcription_file_label, 1, 0, 1, 2)
         self.transcription_layout.addWidget(self.select_audio_button, 2, 0)
         self.transcription_layout.addWidget(self.convert_button, 3, 0, 1, 2)
+
+        self.transcription_layout.addWidget(self.length_label, 4, 0, 1, 2)
+        self.transcription_layout.addWidget(self.estimate_label, 5, 0, 1, 2)
 
         # Stretch last row
         self.transcription_layout.setRowStretch(6, 1)
@@ -206,12 +213,6 @@ class AudioTranscriber(QMainWindow):
         # Added Token Estimate Label
         self.token_estimate_label = QLabel('Estimated Summary Cost: N/A', self)
         self.token_estimate_label.setAlignment(Qt.AlignCenter)
-
-        self.estimate_label = QLabel('Estimated Cost: N/A', self)
-        self.estimate_label.setAlignment(Qt.AlignCenter)
-
-        self.length_label = QLabel('Audio Length: N/A', self)
-        self.length_label.setAlignment(Qt.AlignCenter)
 
         # Model Selection Radio Buttons
         self.model_label = QLabel("Select Summarization Model:", self)
@@ -251,8 +252,6 @@ class AudioTranscriber(QMainWindow):
         # Add widgets to layout
         self.summary_layout.addWidget(self.transcription_file_label_summary)
         self.summary_layout.addWidget(self.load_transcription_button)
-        self.summary_layout.addWidget(self.estimate_label)
-        self.summary_layout.addWidget(self.length_label)
         self.summary_layout.addWidget(self.model_label)
         self.summary_layout.addWidget(self.model_mini_button)
         self.summary_layout.addWidget(self.model_4o_button)
@@ -336,9 +335,6 @@ class AudioTranscriber(QMainWindow):
                 self.convert_button.setEnabled(False)
                 self.summarize_button.setEnabled(True)
                 self.estimate_summary_cost()  # Estimate cost based on loaded text
-                self.estimate_label.setText("Estimated Cost: N/A")
-                self.length_label.setText("Audio Length: N/A")
-
             except Exception as e:
                 self.handle_error(f"Error loading transcription: {e}")
 
@@ -357,8 +353,6 @@ class AudioTranscriber(QMainWindow):
                 self.update_loading_progress)
             self.audio_loading_worker.start()
         else:
-            self.estimate_label.setText("Estimated Cost: N/A")
-            self.length_label.setText("Audio Length: N/A")
             self.estimated_cost = None
             self.audio_length_seconds = None
 
@@ -369,10 +363,15 @@ class AudioTranscriber(QMainWindow):
         self.audio_length_seconds = duration
         duration_minutes = self.audio_length_seconds / 60
         self.estimated_cost = 0.006 * math.ceil(duration_minutes)
+        # Format audio length to HH:MM:SS
+        hours = int(self.audio_length_seconds // 3600)
+        minutes = int((self.audio_length_seconds % 3600) // 60)
+        seconds = int(self.audio_length_seconds % 60)
+        formatted_duration = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+        self.length_label.setText(f"Audio Length: {formatted_duration}")
         self.estimate_label.setText(
             f"Estimated Cost: ${self.estimated_cost:.4f}")
-        self.length_label.setText(
-            f"Audio Length: {self.audio_length_seconds:.2f} seconds")
         self.progress_bar.setVisible(False)
         self.status_label.setText(
             f"File selected: {os.path.basename(self.audio_path)}")
@@ -421,14 +420,6 @@ class AudioTranscriber(QMainWindow):
 
         self.transcribed_text = transcribed_text
         self.estimate_summary_cost()  # Estimate after transcription
-
-        self.estimate_label.setText(
-            f"Final Estimated Cost: ${self.estimated_cost:.4f}")
-        if self.audio_length_seconds:
-            self.length_label.setText(
-                f"Audio Length: {self.audio_length_seconds:.2f} seconds")
-        else:
-            self.length_label.setText("Audio Length: Unknown")
 
     def estimate_summary_cost(self):
         if not self.transcribed_text:

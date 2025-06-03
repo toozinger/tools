@@ -1,6 +1,5 @@
 import openai
 import requests
-from PIL import Image
 import io
 import os
 import logging
@@ -8,11 +7,13 @@ from dotenv import load_dotenv, find_dotenv
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 from slack_sdk import WebClient
-from slack_sdk.errors import SlackApiError
 import concurrent.futures
 import re
 import replicate
 import base64
+from google import genai
+from google.genai import types
+from openai import OpenAI
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -24,6 +25,7 @@ image_bot_token = os.getenv("IMAGE_BOT_TOKEN")
 image_app_token = os.getenv("IMAGE_APP_TOKEN")
 openAI_api_key = os.getenv("OPENAI_API_KEY")
 replicate_api_token = os.getenv("REPLICATE_API_TOKEN")
+google_api_key = os.getenv("GOOGLE_API_KEY")
 
 client = WebClient(token=image_bot_token)
 app = App(token=image_bot_token)
@@ -34,8 +36,10 @@ os.environ["REPLICATE_API_TOKEN"] = replicate_api_token
 # --- IMAGE GENERATION PRICING (update as needed) ---
 IMAGE_GEN_PRICING = {
     "flux": 0.04,    # Price per black-forest-labs / flux-1.1-pro
+    "flux_base": 0.003,  # Price per image using flux schnell
     "dalle": 0.04,   # Price per HD image 1024x1024 image
-    "gpt": 0.042     # Price per mdium quality 1024x1024 image
+    "gpt": 0.042,    # Price per medium quality 1024x1024 image
+    "gemini": 0.04   # Price per image imagegen 3
 }
 
 
@@ -63,7 +67,7 @@ def slack_notify(message, channel_id=None, image_url=None, image_file=None):
                 channel=channel_id,
                 file=image_file,
                 filename="image.png",
-                title=make_slack_title_safe(message)
+                title="Requested Image"
             )
         except Exception as e:
             logger.warning(f"Error sending image: {str(e)}")
@@ -85,7 +89,7 @@ def slack_notify(message, channel_id=None, image_url=None, image_file=None):
 
 def pre_process(prompt):
     try:
-        from openai import OpenAI
+
         client = OpenAI(api_key=openAI_api_key)
         response = client.chat.completions.create(
             model="gpt-4.1-mini",
@@ -118,13 +122,32 @@ class ImageGenerator:
         self.preprocessed_prompt = processed
         return processed is not None
 
-    def generate_image(self, model="flux"):
+    def generate_image(self, model="flux_base"):
         prompt = self.preprocessed_prompt
         if not prompt:
             logger.warning("Prompt not preprocessed!")
             return None
 
-        if model == "flux":
+        if model == "flux_base":
+            try:
+                replicate_api = replicate.Client(
+                    api_token=os.environ["REPLICATE_API_TOKEN"])
+                output = replicate_api.run(
+                    "black-forest-labs/flux-schnell",
+                    input={
+                        "prompt": prompt,
+                        "num_outputs": 1,
+                        "aspect_ratio": "16:9",
+                        "output_format": "png",
+                        "output_quality": 90
+                    }
+                )
+                return {"type": "url", "data": str(output[0])}
+            except Exception as e:
+                logger.error(f"Flux-Schnell image error: {e}")
+                return None
+
+        elif model == "flux":
             try:
                 replicate_api = replicate.Client(
                     api_token=os.environ["REPLICATE_API_TOKEN"])
@@ -157,7 +180,6 @@ class ImageGenerator:
 
         elif model == "gpt":
             try:
-                from openai import OpenAI
                 client = OpenAI(api_key=openAI_api_key)
                 result = client.images.generate(
                     model="gpt-image-1",
@@ -175,30 +197,51 @@ class ImageGenerator:
                 logger.error(f"GPT image error: {e}")
                 return None
 
-        else:
-            logger.error(f"Unknown model '{model}' for image generation")
-            return None
+        elif model == "gemini":
+            try:
+                client = genai.Client(api_key=google_api_key)
+                response = client.models.generate_images(
+                    model='imagen-3.0-generate-002',
+                    prompt=prompt,
+                )
+                generated_image = response.generated_images[0]
+                image_bytes = generated_image.image.image_bytes  # <--- Here!
+
+                image_io = io.BytesIO(image_bytes)
+                return {"type": "file", "data": image_io}
+            except Exception as e:
+                logger.error(f"Gemini image error: {e}")
+                return None
+
 
 # --- CHANGED! Detect -gpt, -dalle, -flux ---
 
 
 def parse_image_command(text):
     lowered = text.lower()
-    method = "flux"  # default
-    # Check for -gpt, -dalle, -flux flag anywhere
+    method = "flux_base"  # use new default!
+    # Check for -gpt, -dalle, -flux, -flux_base, -schnell, -gemini flag
     if "-gpt" in lowered:
         method = "gpt"
-        # Remove the flag for the actual prompt
         prompt = re.sub(r"-gpt\b", "", text, flags=re.IGNORECASE).strip()
     elif "-dalle" in lowered:
         method = "dalle"
         prompt = re.sub(r"-dalle\b", "", text, flags=re.IGNORECASE).strip()
+    elif "-flux_base" in lowered or "-schnell" in lowered:
+        # both explicitly select default
+        method = "flux_base"
+        prompt = re.sub(r"-(flux_base|schnell)\b", "",
+                        text, flags=re.IGNORECASE).strip()
     elif "-flux" in lowered:
-        method = "flux"
+        method = "flux"   # pro, not default!
         prompt = re.sub(r"-flux\b", "", text, flags=re.IGNORECASE).strip()
+    elif "-gemini" in lowered:
+        method = "gemini"
+        prompt = re.sub(r"-gemini\b", "", text, flags=re.IGNORECASE).strip()
     else:
         prompt = text.strip()
     return method, prompt
+
 
 # --- CHANGED: Make requestor mentionable ---
 
@@ -224,7 +267,7 @@ def image_callback(user_input, channel_id, user_id):  # NEW param
     requester = f"<@{user_id}>"
     message = (f"{generator.preprocessed_prompt}\n"
                f"*Requested by {requester}*\n"
-               f"Model: `{model}`. Estimated cost: `${cost:.2f}`")
+               f"Model: `{model}`. Estimated cost: `${cost:.3f}`")
 
     if result["type"] == "url":
         slack_notify(message, channel_id, image_url=result["data"])

@@ -8,6 +8,7 @@ spyder = "*"
 pillow = "*"
 tqdm = "*"
 opencv-python = "*"
+dotenv = "*"
 
 [dev-packages]
 

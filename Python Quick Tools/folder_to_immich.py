@@ -1,32 +1,37 @@
 import requests
 from pathlib import Path
 from datetime import datetime
-import difflib
 from tqdm import tqdm
+from dotenv import load_dotenv
+import os
 
+load_dotenv()  # Load variables from .env file
 
 IMMICH_API_URL = r'http://192.168.1.38:2283/api'
-API_KEY = 'HpmJhX7iQYFkvdsbibpdAv7KhbB6e0mzRDvHC92LPE'
+API_KEY = os.getenv('IMMICH_API_KEY')  # Load API key from environment
+
+if not API_KEY:
+    raise ValueError("API Key not found. Please set IMMICH_API_KEY in your .env file")
 
 class ImmichClient:
-    def __init__(self, api_url, api_key):
+    def __init__(self, api_url, api_key, verbose=False):
         self.api_url = api_url
         self.api_key = api_key
         self.headers = {
             'Accept': 'application/json',
             'x-api-key': self.api_key,
         }
+        self.verbose = verbose
     
     def get_albums(self):
         r = requests.get(f'{self.api_url}/albums', headers=self.headers)
         return r.json() if r.status_code == 200 else []
 
-    def find_album_id(self, target_name, cutoff=0.7):
+    def find_album_id(self, target_name):
         albums = self.get_albums()
-        names = [a['albumName'] for a in albums]
-        match = difflib.get_close_matches(target_name, names, n=1, cutoff=cutoff)
-        if match:
-            return next((a['id'] for a in albums if a['albumName'] == match[0]), None)
+        for album in albums:
+            if album['albumName'] == target_name:
+                return album['id']
         return None
 
     def create_album(self, name, asset_ids=None, description=""):
@@ -57,7 +62,8 @@ class ImmichClient:
             r = requests.post(f'{self.api_url}/assets', headers=self.headers, data=data, files=files)
         if r.status_code in (200, 201):
             return r.json().get('id')
-        print(f"Failed to upload {file_path.name}: {r.status_code} {r.text}")
+        if self.verbose:
+            print(f"Failed to upload {file_path.name}: {r.status_code} {r.text}")
         return None
 
     def add_assets_to_album(self, album_id, asset_ids):
@@ -70,9 +76,8 @@ class ImmichClient:
         print(f"Failed to add assets to album {album_id}: {r.status_code} {r.text}")
         return False
 
-def import_folder_as_album(folder_path, immich: ImmichClient):
-    from tqdm import tqdm  # If you prefer, you can import this at the top of your file
 
+def import_folder_as_album(folder_path, immich: ImmichClient):
     folder_path = Path(folder_path)
     if not folder_path.is_dir():
         print("Invalid directory:", folder_path)
@@ -94,7 +99,34 @@ def import_folder_as_album(folder_path, immich: ImmichClient):
 
     album_id = immich.find_album_id(album_name)
     if album_id:
-        print(f"Found existing album ID: {album_id}, adding photos.")
+        # PROMPT user for decision
+        unique_name = f"{album_name}_2"
+        while True:
+            choice = input(
+                f"An album named '{album_name}' already exists "
+                f"(ID: {album_id}).\n"
+                "Would you like to add photos to this album (y), "
+                f"or create a new album named '{unique_name} (n)?, or "
+                "cance/skip (s)"
+            ).strip().lower()
+            if choice in ["y", "n", "s" ]:
+                break
+            print("Please enter 'y' or 'n'.")
+
+        if choice == "n":
+
+            print(f"Creating new album: {unique_name}")
+            album_id = immich.create_album(unique_name)
+            if not album_id:
+                print("Album creation failed, aborting.")
+                return
+        elif choice == "y":
+            print(f"Adding to existing album: {album_id}")
+            
+        elif choice == "s":
+            print("Skipping adding to an album")
+            return
+            
     else:
         print(f"No album found. Creating new album: {album_name}")
         album_id = immich.create_album(album_name)
@@ -110,8 +142,17 @@ def import_folder_as_album(folder_path, immich: ImmichClient):
 
 
 
-
 if __name__ == "__main__":
-    folder = r'G:\photos_from_old_drive\2006\Big Seattle Snow'
-    client = ImmichClient(IMMICH_API_URL, API_KEY)
-    import_folder_as_album(folder, client)
+    
+    # folders = [r"G:\photos_from_old_drive\2005"]
+    super_path = Path(r"G:\photos_from_old_drive\2005")
+    folders = [p for p in super_path.iterdir() if p.is_dir()]
+
+    client = ImmichClient(IMMICH_API_URL, API_KEY, verbose=False)
+
+    total = len(folders)
+    for i, folder in enumerate(folders, start=1):
+        print(f"{'*'*20}>>> [{i}/{total}] Processing folder: {folder.name}")
+        import_folder_as_album(folder, client)
+    
+    print("All folders processed.")

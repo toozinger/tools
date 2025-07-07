@@ -1,7 +1,7 @@
 {
     "_meta": {
         "hash": {
-            "sha256": "b91d15a06cd3fe5e16fdf388677c6a3f86ff3668b03168462c17e5efacc351fc"
+            "sha256": "fb2d15e9020f29d9c1bd8737502ca4d7a1f829104024dd199a741a0abfdf75e3"
         },
         "pipfile-spec": 6,
         "requires": {
@@ -662,6 +662,13 @@
             ],
             "markers": "python_version >= '3.9'",
             "version": "==0.21.2"
+        },
+        "dotenv": {
+            "hashes": [
+                "sha256:29cf74a087b31dafdb5a446b6d7e11cbce8ed2741540e2339c69fbef92c94ce9"
+            ],
+            "index": "pypi",
+            "version": "==0.9.9"
         },
         "executing": {
             "hashes": [
@@ -1869,6 +1876,14 @@
             ],
             "markers": "python_version >= '2.7' and python_version not in '3.0, 3.1, 3.2'",
             "version": "==2.9.0.post0"
+        },
+        "python-dotenv": {
+            "hashes": [
+                "sha256:31f23644fe2602f88ff55e1f5c79ba497e01224ee7737937930c448e4d0e24dc",
+                "sha256:a8a6399716257f45be6a007360200409fce5cda2661e3dec71d23dc15f6189ab"
+            ],
+            "markers": "python_version >= '3.9'",
+            "version": "==1.1.1"
         },
         "python-lsp-black": {
             "hashes": [

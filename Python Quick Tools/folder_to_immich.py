@@ -50,16 +50,20 @@ class ImmichClient:
             'x-api-key': self.api_key,
         }
         self.verbose = verbose
-    
+
     def get_albums(self):
         r = requests.get(f'{self.api_url}/albums', headers=self.headers)
-        return r.json() if r.status_code == 200 else []
+        if r.status_code == 200:
+            return r.json()
+        if self.verbose:
+            print(f"Failed to get albums: {r.status_code} {r.text}")
+        return []
 
     def find_album_id(self, target_name):
         albums = self.get_albums()
         for album in albums:
-            if album['albumName'] == target_name:
-                return album['id']
+            if album.get('albumName') == target_name:
+                return album.get('id')
         return None
 
     def create_album(self, name, asset_ids=None, description=""):
@@ -85,13 +89,17 @@ class ImmichClient:
             'fileModifiedAt': datetime.fromtimestamp(stats.st_mtime).isoformat(),
             'isFavorite': 'false',
         }
-        with open(file_path, 'rb') as f:
-            files = {'assetData': (file_path.name, f, 'application/octet-stream')}
-            r = requests.post(f'{self.api_url}/assets', headers=self.headers, data=data, files=files)
-        if r.status_code in (200, 201):
-            return r.json().get('id')
-        if self.verbose:
-            print(f"Failed to upload {file_path.name}: {r.status_code} {r.text}")
+        try:
+            with open(file_path, 'rb') as f:
+                files = {'assetData': (file_path.name, f, 'application/octet-stream')}
+                r = requests.post(f'{self.api_url}/assets', headers=self.headers, data=data, files=files)
+            if r.status_code in (200, 201):
+                return r.json().get('id')
+            if self.verbose:
+                print(f"Failed to upload {file_path.name}: {r.status_code} {r.text}")
+        except Exception as e:
+            if self.verbose:
+                print(f"Error uploading {file_path.name}: {e}")
         return None
 
     def add_assets_to_album(self, album_id, asset_ids):
@@ -105,23 +113,19 @@ class ImmichClient:
         return False
 
 
-def import_folder_as_album(folder_path, immich: ImmichClient):
-    folder_path = Path(folder_path)
-    if not folder_path.is_dir():
-        print("Invalid directory:", folder_path)
-        return
-
-    album_name = folder_path.name
-    print(f"Preparing to import to album: {album_name}")
-
+def gather_files_from_folder(folder_path, immich: ImmichClient):
+    """Collect all valid files in a folder (resolving shortcuts/symlinks)."""
     files = []
     for fp in folder_path.iterdir():
         try:
-            # Case 1: Regular file or symlink to file (but not .lnk)
+            # Ignore hidden/system files (optional)
+            if fp.name.startswith('.'):
+                continue
+
+            # Regular file (.lnk handled separately)
             if fp.is_file() and not str(fp).lower().endswith('.lnk'):
                 files.append(fp)
-
-            # Case 2: Windows shortcut .lnk file - resolve target
+            # Windows shortcut .lnk file - resolve target
             elif str(fp).lower().endswith('.lnk'):
                 target = resolve_shortcut(fp)
                 if target:
@@ -130,88 +134,150 @@ def import_folder_as_album(folder_path, immich: ImmichClient):
                         files.append(target_path)
                     else:
                         if immich.verbose:
-                            print(f"Resolved shortcut does not point to a file: {fp}")
+                            print(f"Resolved shortcut does not point to file: {fp}")
                 else:
                     if immich.verbose:
                         print(f"Could not resolve shortcut: {fp}")
-
-            # Case 3: Symlink (non .lnk) - check resolved target is file
+            # Symlink (not .lnk)
             elif fp.is_symlink():
                 target = fp.resolve(strict=True)
                 if target.is_file():
                     files.append(fp)
-
         except FileNotFoundError:
-            # Broken symlink, ignore
             if immich.verbose:
                 print(f"Skipping broken symlink or missing file: {fp}")
             continue
+        except Exception as e:
+            if immich.verbose:
+                print(f"Error accessing {fp}: {e}")
+            continue
+    return files
 
-    if not files:
-        print("No files or valid shortcuts/symlinks found in folder, aborting.")
-        return
 
-    asset_ids = []
-    for fp in tqdm(files, desc="Uploading assets", unit="file"):
-        aid = immich.upload_asset(fp)
-        if aid:
-            asset_ids.append(aid)
-
-    if not asset_ids:
-        print("No assets uploaded, aborting.")
-        return
+def handle_existing_album(immich: ImmichClient, album_name, default_choice=None):
+    """Deal with naming/already-existing-album logic. Returns album ID or None on cancel."""
 
     album_id = immich.find_album_id(album_name)
-    if album_id:
-        unique_name = f"{album_name}_2"
+    if not album_id:
+        return None  # No conflict, album doesn't exist yet
+
+    unique_name = f"{album_name}_2"
+
+    if default_choice and default_choice.lower() in ['y', 'n', 's']:
+        choice = default_choice.lower()
+        print(f"Default choice '{choice}' selected for album '{album_name}'.")
+    else:
         while True:
             choice = input(
-                f"An album named '{album_name}' already exists "
-                f"(ID: {album_id}).\n"
-                "Would you like to add photos to this album (y), "
-                f"or create a new album named '{unique_name} (n)?, or "
-                "cancel/skip (s): "
+                f"An album named '{album_name}' already exists (ID: {album_id}).\n"
+                f"Would you like to add photos to this album (y), "
+                f"or create a new album named '{unique_name}' (n), "
+                "or cancel/skip (s): "
             ).strip().lower()
             if choice in ["y", "n", "s"]:
                 break
             print("Please enter 'y', 'n', or 's'.")
 
-        if choice == "n":
-            print(f"Creating new album: {unique_name}")
-            album_id = immich.create_album(unique_name)
-            if not album_id:
-                print("Album creation failed, aborting.")
-                return
-        elif choice == "y":
-            print(f"Adding to existing album: {album_id}")
-        elif choice == "s":
-            print("Skipping adding to an album")
-            return
-    else:
-        print(f"No album found. Creating new album: {album_name}")
-        album_id = immich.create_album(album_name)
-        if not album_id:
+    if choice == 'y':
+        return album_id
+
+    if choice == 'n':
+        print(f"Creating new album: {unique_name}")
+        new_album_id = immich.create_album(unique_name)
+        if not new_album_id:
             print("Album creation failed, aborting.")
+        return new_album_id
+
+    print("Skipping.")
+    return None  # Cancel
+
+
+def import_single_folder_as_album(folder_path, immich: ImmichClient, default_choice=None):
+    """Imports the given folder as one album. Handles prompting for name conflicts."""
+
+    album_name = folder_path.name
+    print(f"Preparing to import to album: {album_name}")
+
+    files = gather_files_from_folder(folder_path, immich)
+    if not files:
+        print(f"No files or valid shortcuts/symlinks found in folder '{folder_path}', aborting.")
+        return
+
+    asset_ids = []
+    for fp in tqdm(files, desc=f"Uploading assets from {album_name}", unit="file"):
+        aid = immich.upload_asset(fp)
+        if aid:
+            asset_ids.append(aid)
+
+    if not asset_ids:
+        print(f"No assets uploaded from folder '{folder_path}', aborting.")
+        return
+
+    album_id = handle_existing_album(immich, album_name, default_choice)
+    if album_id is None:
+        # The album didn't exist or user cancelled
+        if immich.find_album_id(album_name) is None:
+            album_id = immich.create_album(album_name)
+        # User might have cancelled or creation failed
+        if album_id is None:
+            print("Skipping (user cancelled or album creation failed).")
             return
 
     success = immich.add_assets_to_album(album_id, asset_ids)
     if success:
-        print("Import completed.")
+        print(f"Import completed for album '{album_name}'.")
     else:
-        print("Failed to add assets to album.")
+        print(f"Failed to add assets to album '{album_name}'.")
+
+
+def import_folder_as_album(folder_path, client, default_choice=None):
+    """
+    Import this folder (and optionally all subfolders) as albums.
+    Only bottom-level folders containing files (and no subfolders) will be imported.
+    """
+
+    folder_path = Path(folder_path)
+    if not folder_path.is_dir():
+        print("Invalid directory:", folder_path)
+        return
+
+    print(f"Working on base folder recursively: {folder_path}")
+
+    # Get all directories recursively
+    all_dirs = [folder_path] + [p for p in folder_path.rglob('*') if p.is_dir()]
+
+    # Filter to only bottom folders that contain files and no subdirectories
+    all_folders = []
+    for folder in all_dirs:
+        try:
+            # Using try/except in case permission error on some folders
+            entries = list(folder.iterdir())
+        except Exception as e:
+            if client.verbose:
+                print(f"Cannot access {folder}: {e}")
+            continue
+
+        has_files = any(f.is_file() for f in entries)
+        has_subdirs = any(d.is_dir() for d in entries)
+        if has_files and not has_subdirs:
+            all_folders.append(folder)
+
+    total = len(all_folders)
+    for i, folder in enumerate(all_folders, start=1):
+        print(f"{'*' * 20}>>> [{i}/{total}] Processing folder: {folder}")
+        import_single_folder_as_album(folder, client, default_choice=default_choice)
 
 
 if __name__ == "__main__":
-    # folders = [Path(r"H:\final_folder\3D Printing")]
-    # If you want to scan directories inside a parent folder:
-    super_path = Path(r"G:\photos_from_old_drive\2009")
-    folders = [p for p in super_path.iterdir() if p.is_dir()]
+
+    # Default user choice for album conflict: 'y' - add to existing album
+    default_choice = "y"
+
+    # Set your target folder path here
+    folder_path = r"G:\photos_from_old_drive\2013"
 
     client = ImmichClient(IMMICH_API_URL, API_KEY, verbose=False)
 
-    total = len(folders)
-    for i, folder in enumerate(folders, start=1):
-        print(f"{'*'*20}>>> [{i}/{total}] Processing folder: {folder.name}")
-        import_folder_as_album(folder, client)
-    
+    import_folder_as_album(folder_path, client, default_choice=default_choice)
+
     print("All folders processed.")

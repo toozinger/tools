@@ -4,6 +4,8 @@ from datetime import datetime
 from tqdm import tqdm
 from dotenv import load_dotenv
 import os
+import pythoncom
+from win32com.shell import shell, shellcon
 
 load_dotenv()  # Load variables from .env file
 
@@ -12,6 +14,32 @@ API_KEY = os.getenv('IMMICH_API_KEY')  # Load API key from environment
 
 if not API_KEY:
     raise ValueError("API Key not found. Please set IMMICH_API_KEY in your .env file")
+
+def resolve_shortcut(path):
+    """
+    Resolve a Windows shortcut (.lnk) file to its target path.
+
+    Returns the resolved target path as a string, or None if cannot resolve.
+    """
+    if not os.path.exists(path):
+        return None
+    if not str(path).lower().endswith('.lnk'):
+        return str(path)
+
+    try:
+        shortcut = pythoncom.CoCreateInstance(
+            shell.CLSID_ShellLink, None,
+            pythoncom.CLSCTX_INPROC_SERVER, shell.IID_IShellLink)
+        persist_file = shortcut.QueryInterface(pythoncom.IID_IPersistFile)
+        persist_file.Load(str(path))
+        target_path, _ = shortcut.GetPath(shell.SLGP_RAWPATH)
+        if target_path and os.path.exists(target_path):
+            return target_path
+    except Exception as e:
+        print(f"Failed to resolve shortcut '{path}': {e}")
+
+    return None
+
 
 class ImmichClient:
     def __init__(self, api_url, api_key, verbose=False):
@@ -86,7 +114,43 @@ def import_folder_as_album(folder_path, immich: ImmichClient):
     album_name = folder_path.name
     print(f"Preparing to import to album: {album_name}")
 
-    files = [fp for fp in folder_path.iterdir() if fp.is_file()]
+    files = []
+    for fp in folder_path.iterdir():
+        try:
+            # Case 1: Regular file or symlink to file (but not .lnk)
+            if fp.is_file() and not str(fp).lower().endswith('.lnk'):
+                files.append(fp)
+
+            # Case 2: Windows shortcut .lnk file - resolve target
+            elif str(fp).lower().endswith('.lnk'):
+                target = resolve_shortcut(fp)
+                if target:
+                    target_path = Path(target)
+                    if target_path.is_file():
+                        files.append(target_path)
+                    else:
+                        if immich.verbose:
+                            print(f"Resolved shortcut does not point to a file: {fp}")
+                else:
+                    if immich.verbose:
+                        print(f"Could not resolve shortcut: {fp}")
+
+            # Case 3: Symlink (non .lnk) - check resolved target is file
+            elif fp.is_symlink():
+                target = fp.resolve(strict=True)
+                if target.is_file():
+                    files.append(fp)
+
+        except FileNotFoundError:
+            # Broken symlink, ignore
+            if immich.verbose:
+                print(f"Skipping broken symlink or missing file: {fp}")
+            continue
+
+    if not files:
+        print("No files or valid shortcuts/symlinks found in folder, aborting.")
+        return
+
     asset_ids = []
     for fp in tqdm(files, desc="Uploading assets", unit="file"):
         aid = immich.upload_asset(fp)
@@ -99,7 +163,6 @@ def import_folder_as_album(folder_path, immich: ImmichClient):
 
     album_id = immich.find_album_id(album_name)
     if album_id:
-        # PROMPT user for decision
         unique_name = f"{album_name}_2"
         while True:
             choice = input(
@@ -107,14 +170,13 @@ def import_folder_as_album(folder_path, immich: ImmichClient):
                 f"(ID: {album_id}).\n"
                 "Would you like to add photos to this album (y), "
                 f"or create a new album named '{unique_name} (n)?, or "
-                "cance/skip (s)"
+                "cancel/skip (s): "
             ).strip().lower()
-            if choice in ["y", "n", "s" ]:
+            if choice in ["y", "n", "s"]:
                 break
-            print("Please enter 'y' or 'n'.")
+            print("Please enter 'y', 'n', or 's'.")
 
         if choice == "n":
-
             print(f"Creating new album: {unique_name}")
             album_id = immich.create_album(unique_name)
             if not album_id:
@@ -122,11 +184,9 @@ def import_folder_as_album(folder_path, immich: ImmichClient):
                 return
         elif choice == "y":
             print(f"Adding to existing album: {album_id}")
-            
         elif choice == "s":
             print("Skipping adding to an album")
             return
-            
     else:
         print(f"No album found. Creating new album: {album_name}")
         album_id = immich.create_album(album_name)
@@ -141,11 +201,10 @@ def import_folder_as_album(folder_path, immich: ImmichClient):
         print("Failed to add assets to album.")
 
 
-
 if __name__ == "__main__":
-    
-    # folders = [r"G:\photos_from_old_drive\2005"]
-    super_path = Path(r"G:\photos_from_old_drive\2005")
+    # folders = [Path(r"H:\final_folder\3D Printing")]
+    # If you want to scan directories inside a parent folder:
+    super_path = Path(r"G:\photos_from_old_drive\2009")
     folders = [p for p in super_path.iterdir() if p.is_dir()]
 
     client = ImmichClient(IMMICH_API_URL, API_KEY, verbose=False)

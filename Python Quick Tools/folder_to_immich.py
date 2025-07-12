@@ -6,6 +6,8 @@ from dotenv import load_dotenv
 import os
 import pythoncom
 from win32com.shell import shell, shellcon
+import gc
+import time
 
 load_dotenv()  # Load variables from .env file
 
@@ -14,6 +16,7 @@ API_KEY = os.getenv('IMMICH_API_KEY')  # Load API key from environment
 
 if not API_KEY:
     raise ValueError("API Key not found. Please set IMMICH_API_KEY in your .env file")
+
 
 def resolve_shortcut(path):
     """
@@ -42,7 +45,7 @@ def resolve_shortcut(path):
 
 
 class ImmichClient:
-    def __init__(self, api_url, api_key, verbose=False):
+    def __init__(self, api_url, api_key, verbose=False, max_retries=3, retry_delay=3):
         self.api_url = api_url
         self.api_key = api_key
         self.headers = {
@@ -50,6 +53,8 @@ class ImmichClient:
             'x-api-key': self.api_key,
         }
         self.verbose = verbose
+        self.max_retries = max_retries
+        self.retry_delay = retry_delay
 
     def get_albums(self):
         r = requests.get(f'{self.api_url}/albums', headers=self.headers)
@@ -89,17 +94,35 @@ class ImmichClient:
             'fileModifiedAt': datetime.fromtimestamp(stats.st_mtime).isoformat(),
             'isFavorite': 'false',
         }
-        try:
-            with open(file_path, 'rb') as f:
-                files = {'assetData': (file_path.name, f, 'application/octet-stream')}
-                r = requests.post(f'{self.api_url}/assets', headers=self.headers, data=data, files=files)
-            if r.status_code in (200, 201):
-                return r.json().get('id')
-            if self.verbose:
-                print(f"Failed to upload {file_path.name}: {r.status_code} {r.text}")
-        except Exception as e:
-            if self.verbose:
-                print(f"Error uploading {file_path.name}: {e}")
+
+        attempts = 0
+        while attempts < self.max_retries:
+            attempts += 1
+            try:
+                with open(file_path, 'rb') as f:
+                    # File handle is passed to requests; file streamed, not fully read into memory
+                    files = {'assetData': (file_path.name, f, 'application/octet-stream')}
+                    r = requests.post(f'{self.api_url}/assets', headers=self.headers, data=data, files=files, timeout=60)
+                if r.status_code in (200, 201):
+                    return r.json().get('id')
+                else:
+                    if self.verbose:
+                        print(f"Upload fail {file_path.name} [{r.status_code}]: {r.text}")
+            except MemoryError as me:
+                print(f"MemoryError encountered uploading {file_path.name}, attempt {attempts} of {self.max_retries}")
+                gc.collect()
+                time.sleep(self.retry_delay)
+            except requests.exceptions.RequestException as e:
+                if self.verbose:
+                    print(f"Request error uploading {file_path.name}: {e}. Retrying ({attempts}/{self.max_retries})")
+                time.sleep(self.retry_delay)
+            except Exception as e:
+                if self.verbose:
+                    print(f"Error uploading {file_path.name}: {e}")
+                break  # Unexpected error, no retry
+
+        if self.verbose:
+            print(f"Failed to upload {file_path.name} after {self.max_retries} attempts.")
         return None
 
     def add_assets_to_album(self, album_id, asset_ids):
@@ -204,10 +227,14 @@ def import_single_folder_as_album(folder_path, immich: ImmichClient, default_cho
         return
 
     asset_ids = []
-    for fp in tqdm(files, desc=f"Uploading assets from {album_name}", unit="file"):
+    for i, fp in enumerate(tqdm(files, desc=f"Uploading assets from {album_name}", unit="file")):
         aid = immich.upload_asset(fp)
         if aid:
             asset_ids.append(aid)
+
+        # Periodic garbage collection every 10 uploads to free memory
+        if i > 0 and i % 10 == 0:
+            gc.collect()
 
     if not asset_ids:
         print(f"No assets uploaded from folder '{folder_path}', aborting.")
@@ -266,6 +293,8 @@ def import_folder_as_album(folder_path, client, default_choice=None):
     for i, folder in enumerate(all_folders, start=1):
         print(f"{'*' * 20}>>> [{i}/{total}] Processing folder: {folder}")
         import_single_folder_as_album(folder, client, default_choice=default_choice)
+        # Run garbage collection after each folder processed to release memory
+        gc.collect()
 
 
 if __name__ == "__main__":
@@ -274,7 +303,7 @@ if __name__ == "__main__":
     default_choice = "y"
 
     # Set your target folder path here
-    folder_path = r"G:\photos_from_old_drive\2013"
+    folder_path = r"G:\photos_from_old_drive\2012"
 
     client = ImmichClient(IMMICH_API_URL, API_KEY, verbose=False)
 

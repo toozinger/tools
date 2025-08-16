@@ -5,10 +5,16 @@ name = "pypi"
 
 [packages]
 spyder = "*"
-pillow = "*"
 tqdm = "*"
-opencv-python = "*"
 dotenv = "*"
+pywin32 = "*"
+py7zr = "*"
+pillow = "*"
+pyautogui = "*"
+pytesseract = "*"
+opencv-python = "*"
+matplotlib = "*"
+scipy = "*"
 
 [dev-packages]
 

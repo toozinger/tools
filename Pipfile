@@ -20,6 +20,7 @@ matplotlib = "*"
 python-dotenv = "*"
 google-generativeai = "*"
 google-genai = "*"
+keyboard = "*"
 
 [dev-packages]
 
